@@ -233,35 +233,49 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
 
 def _i_responded(msg: dict, my_id: str) -> bool:
     sender = msg.get("user")
-    reaction_counts = sender not in REACTION_NOT_A_REPLY_USERS
-    if reaction_counts:
-        for r in msg.get("reactions", []) or []:
+    reaction_counts_for_sender = sender not in REACTION_NOT_A_REPLY_USERS
+
+    def check_reactions(m: dict) -> bool:
+        if not reaction_counts_for_sender:
+            return False
+        for r in m.get("reactions", []) or []:
             if my_id in (r.get("users") or []):
                 return True
+        return False
+
+    if check_reactions(msg):
+        return True
     if msg.get("reply_users") and my_id in msg["reply_users"]:
         return True
+
     channel_id = (msg.get("channel") or {}).get("id")
     ts = msg.get("ts")
     if not channel_id or not ts:
         return False
-    # search.messages doesn't reliably include thread_ts, so fetch the canonical
-    # message from history to learn whether it lives inside a thread.
-    thread_ts = msg.get("thread_ts")
-    if not thread_ts:
-        try:
-            hist = slack_call(
-                "conversations.history",
-                SLACK_USER_TOKEN,
-                channel=channel_id,
-                oldest=ts,
-                latest=ts,
-                inclusive="true",
-                limit=1,
-            )
-            canon = (hist.get("messages") or [{}])[0]
-            thread_ts = canon.get("thread_ts") or ts
-        except RuntimeError:
-            thread_ts = ts
+
+    # Fetch canonical message — gives reliable reactions + thread_ts.
+    canon = None
+    try:
+        hist = slack_call(
+            "conversations.history",
+            SLACK_USER_TOKEN,
+            channel=channel_id,
+            oldest=ts,
+            latest=ts,
+            inclusive="true",
+            limit=1,
+        )
+        canon = (hist.get("messages") or [{}])[0]
+    except RuntimeError:
+        pass
+
+    if canon:
+        if check_reactions(canon):
+            return True
+        if canon.get("reply_users") and my_id in canon["reply_users"]:
+            return True
+
+    thread_ts = (canon or {}).get("thread_ts") or msg.get("thread_ts") or ts
     try:
         thread = slack_call(
             "conversations.replies",
@@ -271,14 +285,19 @@ def _i_responded(msg: dict, my_id: str) -> bool:
             limit=200,
         )
     except RuntimeError:
+        # Can't verify (likely scope issue on a private channel). Be conservative:
+        # if the canonical message shows the thread has replies, assume I might have
+        # responded and skip flagging to avoid noisy false positives.
+        if canon and canon.get("reply_count", 0) > 0:
+            return True
         return False
+
     replies = thread.get("messages", [])
-    # If replies only contain the message itself, it's not a thread — no response possible here.
     if len(replies) <= 1 and thread_ts == ts:
         return False
     for reply in replies:
         if reply.get("ts") == ts:
-            continue  # the mention itself
+            continue
         if reply.get("user") == my_id:
             return True
     return False
