@@ -158,19 +158,52 @@ def fetch_ignored_dms(my_id: str, oldest_ts: float) -> list[dict]:
     return ignored
 
 
+def fetch_my_usergroup_ids(my_id: str) -> list[str]:
+    """User group IDs (Sxxxx) that include me. Needs usergroups:read scope."""
+    try:
+        groups = slack_call("usergroups.list", SLACK_USER_TOKEN).get("usergroups", [])
+    except RuntimeError as e:
+        print(f"[warn] can't list usergroups: {e}", file=sys.stderr)
+        return []
+    mine = []
+    for g in groups:
+        if g.get("date_delete"):
+            continue
+        try:
+            members = slack_call(
+                "usergroups.users.list", SLACK_USER_TOKEN, usergroup=g["id"]
+            ).get("users", [])
+        except RuntimeError:
+            continue
+        if my_id in members:
+            mine.append(g["id"])
+    return mine
+
+
 def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
-    """Channel mentions of me where I didn't react or reply in-thread."""
-    query = f"<@{my_id}>"
-    data = slack_call(
-        "search.messages",
-        SLACK_USER_TOKEN,
-        query=query,
-        sort="timestamp",
-        sort_dir="desc",
-        count=50,
-    )
+    """Channel mentions of me (direct or via a user group) where I didn't react or reply in-thread."""
+    group_ids = fetch_my_usergroup_ids(my_id)
+    queries = [f"<@{my_id}>"] + [f"<!subteam^{gid}>" for gid in group_ids]
+    matches_by_ts = {}
+    for q in queries:
+        try:
+            data = slack_call(
+                "search.messages",
+                SLACK_USER_TOKEN,
+                query=q,
+                sort="timestamp",
+                sort_dir="desc",
+                count=50,
+            )
+        except RuntimeError as e:
+            print(f"[warn] search '{q}': {e}", file=sys.stderr)
+            continue
+        for m in data.get("messages", {}).get("matches", []):
+            ts = m.get("ts")
+            if ts and ts not in matches_by_ts:
+                matches_by_ts[ts] = m
     ignored = []
-    for msg in data.get("messages", {}).get("matches", []):
+    for msg in matches_by_ts.values():
         try:
             ts = float(msg.get("ts", 0))
         except (TypeError, ValueError):
@@ -315,7 +348,7 @@ def main() -> int:
         ignored_mentions = []
 
     text = build_message(issues, ignored_dms, ignored_mentions)
-    slack_post("chat.postMessage", SLACK_USER_TOKEN, channel=DIGEST_CHANNEL, text=text, unfurl_links=False, unfurl_media=False, as_user=True)
+    slack_post("chat.postMessage", SLACK_BOT_TOKEN, channel=DIGEST_CHANNEL, text=text, unfurl_links=False, unfurl_media=False)
     print(f"Sent digest: {len(issues)} issues, {len(ignored_dms)} DMs, {len(ignored_mentions)} mentions")
     return 0
 
