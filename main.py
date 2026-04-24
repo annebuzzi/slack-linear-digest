@@ -174,6 +174,8 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
             continue
         if msg.get("user") == my_id:
             continue
+        if msg.get("bot_id") or msg.get("app_id") or msg.get("subtype") == "bot_message":
+            continue  # ignore automation pings
         channel = msg.get("channel", {})
         if channel.get("is_im") or channel.get("is_mpim"):
             continue  # handled by DM pass
