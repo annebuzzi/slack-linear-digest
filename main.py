@@ -348,8 +348,12 @@ def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
             limit=200,
         )
     except RuntimeError:
-        # Can't fetch the thread. If the canonical message shows I'm in reply_users,
-        # trust that; otherwise flag — user can dismiss false positives manually.
+        # Thread fetch failed. If we also couldn't fetch the canonical message,
+        # the channel is fully inaccessible (e.g. private without groups:history).
+        # Skip rather than flag — I can't verify either way, and false positives
+        # for channels I can't see are the worst kind of noise.
+        if history_failed:
+            return True
         if canon and canon.get("reply_users") and my_id in canon["reply_users"]:
             return True
         return False
