@@ -1,0 +1,275 @@
+"""Daily digest: Linear tasks due today + Slack messages I haven't replied to.
+
+Sends a single DM to the user on Slack.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv(Path.home() / ".env.shared")
+load_dotenv()  # local .env overrides
+
+LINEAR_API_KEY = os.environ["LINEAR_API_KEY"]
+SLACK_USER_TOKEN = os.environ["SLACK_USER_TOKEN"]
+SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
+MY_EMAIL = os.environ["MY_EMAIL"]
+IGNORED_LOOKBACK_HOURS = int(os.environ.get("IGNORED_LOOKBACK_HOURS", "48"))
+
+LINEAR_URL = "https://api.linear.app/graphql"
+SLACK_URL = "https://slack.com/api"
+
+
+# ---------- Linear ----------
+
+def linear_query(query: str, variables: dict | None = None) -> dict:
+    r = requests.post(
+        LINEAR_URL,
+        json={"query": query, "variables": variables or {}},
+        headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if "errors" in data:
+        raise RuntimeError(f"Linear error: {data['errors']}")
+    return data["data"]
+
+
+def fetch_due_today() -> list[dict]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    query = """
+    query DueToday($today: TimelessDateOrDuration!) {
+      viewer {
+        assignedIssues(
+          filter: {
+            dueDate: { lte: $today }
+            state: { type: { nin: ["completed", "canceled"] } }
+          }
+          first: 50
+        ) {
+          nodes {
+            identifier
+            title
+            url
+            dueDate
+            priority
+            state { name }
+          }
+        }
+      }
+    }
+    """
+    data = linear_query(query, {"today": today})
+    issues = data["viewer"]["assignedIssues"]["nodes"]
+    issues.sort(key=lambda i: (i.get("dueDate") or "", -i.get("priority", 0)))
+    return issues
+
+
+# ---------- Slack ----------
+
+def slack_call(method: str, token: str, **params) -> dict:
+    r = requests.get(
+        f"{SLACK_URL}/{method}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack {method} error: {data.get('error')}")
+    return data
+
+
+def slack_post(method: str, token: str, **payload) -> dict:
+    r = requests.post(
+        f"{SLACK_URL}/{method}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json=payload,
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack {method} error: {data.get('error')}")
+    return data
+
+
+def resolve_user_id(email: str) -> str:
+    return slack_call("users.lookupByEmail", SLACK_USER_TOKEN, email=email)["user"]["id"]
+
+
+def fetch_ignored_dms(my_id: str, oldest_ts: float) -> list[dict]:
+    """DMs/MPIMs where the most recent message is from someone else (I haven't replied)."""
+    ignored = []
+    cursor = None
+    while True:
+        params = {"types": "im,mpim", "limit": 100, "exclude_archived": True}
+        if cursor:
+            params["cursor"] = cursor
+        data = slack_call("conversations.list", SLACK_USER_TOKEN, **params)
+        for conv in data.get("channels", []):
+            try:
+                hist = slack_call(
+                    "conversations.history",
+                    SLACK_USER_TOKEN,
+                    channel=conv["id"],
+                    limit=5,
+                    oldest=str(oldest_ts),
+                )
+            except RuntimeError:
+                continue
+            msgs = [m for m in hist.get("messages", []) if m.get("type") == "message" and not m.get("subtype")]
+            if not msgs:
+                continue
+            latest = msgs[0]
+            if latest.get("user") == my_id or latest.get("bot_id"):
+                continue
+            sender = latest.get("user", "unknown")
+            ignored.append({
+                "channel_id": conv["id"],
+                "is_mpim": conv.get("is_mpim", False),
+                "user_id": sender,
+                "text": latest.get("text", "")[:200],
+                "ts": latest.get("ts"),
+            })
+        cursor = data.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    return ignored
+
+
+def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
+    """Channel mentions of me where I didn't react or reply in-thread."""
+    query = f"<@{my_id}>"
+    data = slack_call(
+        "search.messages",
+        SLACK_USER_TOKEN,
+        query=query,
+        sort="timestamp",
+        sort_dir="desc",
+        count=50,
+    )
+    ignored = []
+    for msg in data.get("messages", {}).get("matches", []):
+        try:
+            ts = float(msg.get("ts", 0))
+        except (TypeError, ValueError):
+            continue
+        if ts < oldest_ts:
+            continue
+        if msg.get("user") == my_id:
+            continue
+        channel = msg.get("channel", {})
+        if channel.get("is_im") or channel.get("is_mpim"):
+            continue  # handled by DM pass
+        # Check replies + reactions — if I participated, skip.
+        if _i_responded(msg, my_id):
+            continue
+        ignored.append({
+            "channel_id": channel.get("id"),
+            "channel_name": channel.get("name"),
+            "user_id": msg.get("user"),
+            "text": (msg.get("text") or "")[:200],
+            "ts": msg.get("ts"),
+            "permalink": msg.get("permalink"),
+        })
+    return ignored
+
+
+def _i_responded(msg: dict, my_id: str) -> bool:
+    for r in msg.get("reactions", []) or []:
+        if my_id in (r.get("users") or []):
+            return True
+    if msg.get("reply_users") and my_id in msg["reply_users"]:
+        return True
+    if msg.get("thread_ts") and msg.get("reply_count", 0) > 0:
+        try:
+            thread = slack_call(
+                "conversations.replies",
+                SLACK_USER_TOKEN,
+                channel=msg["channel"]["id"],
+                ts=msg["thread_ts"],
+                limit=50,
+            )
+            for reply in thread.get("messages", []):
+                if reply.get("user") == my_id:
+                    return True
+        except RuntimeError:
+            pass
+    return False
+
+
+# ---------- Formatting ----------
+
+PRIORITY = {0: "—", 1: "🔴 Urgent", 2: "🟠 High", 3: "🟡 Med", 4: "🟢 Low"}
+
+
+def build_message(issues: list[dict], ignored_dms: list[dict], ignored_mentions: list[dict]) -> str:
+    today = datetime.now().strftime("%A, %b %d")
+    lines = [f"*Daily digest — {today}*", ""]
+
+    lines.append(f"*📋 Linear — due today or overdue ({len(issues)})*")
+    if not issues:
+        lines.append("_Nothing due. 🎉_")
+    else:
+        for i in issues:
+            prio = PRIORITY.get(i.get("priority", 0), "—")
+            due = i.get("dueDate") or "—"
+            lines.append(f"• <{i['url']}|{i['identifier']}> {i['title']} · {prio} · due {due} · _{i['state']['name']}_")
+    lines.append("")
+
+    lines.append(f"*💬 Slack DMs waiting on you ({len(ignored_dms)})*")
+    if not ignored_dms:
+        lines.append("_Inbox zero on DMs. 🙌_")
+    else:
+        for d in ignored_dms[:15]:
+            who = f"<@{d['user_id']}>"
+            preview = d["text"].replace("\n", " ")
+            lines.append(f"• {who}: {preview}")
+    lines.append("")
+
+    lines.append(f"*🔔 Mentions you haven't responded to ({len(ignored_mentions)})*")
+    if not ignored_mentions:
+        lines.append("_All caught up._")
+    else:
+        for m in ignored_mentions[:15]:
+            link = m.get("permalink") or ""
+            ch = f"#{m['channel_name']}" if m.get("channel_name") else ""
+            preview = m["text"].replace("\n", " ")
+            if link:
+                lines.append(f"• <{link}|{ch}> <@{m['user_id']}>: {preview}")
+            else:
+                lines.append(f"• {ch} <@{m['user_id']}>: {preview}")
+
+    return "\n".join(lines)
+
+
+# ---------- Main ----------
+
+def main() -> int:
+    my_id = resolve_user_id(MY_EMAIL)
+    oldest_ts = (datetime.now(timezone.utc) - timedelta(hours=IGNORED_LOOKBACK_HOURS)).timestamp()
+
+    issues = fetch_due_today()
+    ignored_dms = fetch_ignored_dms(my_id, oldest_ts)
+    ignored_mentions = fetch_ignored_mentions(my_id, oldest_ts)
+
+    text = build_message(issues, ignored_dms, ignored_mentions)
+    slack_post("chat.postMessage", SLACK_BOT_TOKEN, channel=my_id, text=text, unfurl_links=False, unfurl_media=False)
+    print(f"Sent digest: {len(issues)} issues, {len(ignored_dms)} DMs, {len(ignored_mentions)} mentions")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
