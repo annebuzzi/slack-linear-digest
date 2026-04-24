@@ -197,22 +197,43 @@ def _i_responded(msg: dict, my_id: str) -> bool:
     if msg.get("reply_users") and my_id in msg["reply_users"]:
         return True
     channel_id = (msg.get("channel") or {}).get("id")
-    if not channel_id:
+    ts = msg.get("ts")
+    if not channel_id or not ts:
         return False
-    # Always check the thread — search.messages doesn't reliably populate reply_users.
-    thread_ts = msg.get("thread_ts") or msg.get("ts")
+    # search.messages doesn't reliably include thread_ts, so fetch the canonical
+    # message from history to learn whether it lives inside a thread.
+    thread_ts = msg.get("thread_ts")
+    if not thread_ts:
+        try:
+            hist = slack_call(
+                "conversations.history",
+                SLACK_USER_TOKEN,
+                channel=channel_id,
+                oldest=ts,
+                latest=ts,
+                inclusive="true",
+                limit=1,
+            )
+            canon = (hist.get("messages") or [{}])[0]
+            thread_ts = canon.get("thread_ts") or ts
+        except RuntimeError:
+            thread_ts = ts
     try:
         thread = slack_call(
             "conversations.replies",
             SLACK_USER_TOKEN,
             channel=channel_id,
             ts=thread_ts,
-            limit=100,
+            limit=200,
         )
     except RuntimeError:
         return False
-    for reply in thread.get("messages", []):
-        if reply.get("ts") == msg.get("ts"):
+    replies = thread.get("messages", [])
+    # If replies only contain the message itself, it's not a thread — no response possible here.
+    if len(replies) <= 1 and thread_ts == ts:
+        return False
+    for reply in replies:
+        if reply.get("ts") == ts:
             continue  # the mention itself
         if reply.get("user") == my_id:
             return True
