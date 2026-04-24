@@ -21,6 +21,7 @@ SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN") or os.environ["SLACK_SUPPO
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN") or os.environ["SLACK_SUPPORTBOT_BOT_TOKEN"]
 MY_EMAIL = os.environ.get("MY_EMAIL", "anne.buzzi@archive.com")
 MY_SLACK_USER_ID = os.environ.get("MY_SLACK_USER_ID", "U06SZT6KZ7C")
+DIGEST_CHANNEL = os.environ.get("DIGEST_CHANNEL", "anne")
 IGNORED_LOOKBACK_HOURS = int(os.environ.get("IGNORED_LOOKBACK_HOURS", "48"))
 
 LINEAR_URL = "https://api.linear.app/graphql"
@@ -304,7 +305,7 @@ def main() -> int:
         ignored_mentions = []
 
     text = build_message(issues, ignored_dms, ignored_mentions)
-    slack_post("chat.postMessage", SLACK_BOT_TOKEN, channel=my_id, text=text, unfurl_links=False, unfurl_media=False)
+    slack_post("chat.postMessage", SLACK_USER_TOKEN, channel=DIGEST_CHANNEL, text=text, unfurl_links=False, unfurl_media=False, as_user=True)
     print(f"Sent digest: {len(issues)} issues, {len(ignored_dms)} DMs, {len(ignored_mentions)} mentions")
     return 0
 
