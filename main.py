@@ -212,13 +212,16 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
             continue
         if msg.get("user") == my_id:
             continue
-        if msg.get("bot_id") or msg.get("app_id") or msg.get("subtype") == "bot_message":
-            continue  # ignore automation pings
+        if _looks_like_bot(msg):
+            continue
         channel = msg.get("channel", {})
         if channel.get("is_im") or channel.get("is_mpim"):
             continue  # handled by DM pass
-        # Check replies + reactions — if I participated, skip.
-        if _i_responded(msg, my_id):
+        # Canonical fetch also lets us re-check bot fields that search.messages omits.
+        canon = _fetch_canonical(channel.get("id"), msg.get("ts"))
+        if canon and _looks_like_bot(canon):
+            continue
+        if _i_responded(msg, my_id, canon=canon):
             continue
         ignored.append({
             "channel_id": channel.get("id"),
@@ -231,7 +234,38 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
     return ignored
 
 
-def _i_responded(msg: dict, my_id: str) -> bool:
+def _looks_like_bot(m: dict) -> bool:
+    if m.get("bot_id") or m.get("app_id"):
+        return True
+    subtype = m.get("subtype")
+    if subtype in ("bot_message", "bot_add", "app_conversation_join"):
+        return True
+    # search.messages bot results often have username set but no user.
+    if m.get("username") and not m.get("user"):
+        return True
+    return False
+
+
+def _fetch_canonical(channel_id: str | None, ts: str | None) -> dict | None:
+    if not channel_id or not ts:
+        return None
+    try:
+        hist = slack_call(
+            "conversations.history",
+            SLACK_USER_TOKEN,
+            channel=channel_id,
+            oldest=ts,
+            latest=ts,
+            inclusive="true",
+            limit=1,
+        )
+    except RuntimeError:
+        return None
+    msgs = hist.get("messages") or []
+    return msgs[0] if msgs else None
+
+
+def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
     sender = msg.get("user")
     reaction_counts_for_sender = sender not in REACTION_NOT_A_REPLY_USERS
 
@@ -253,22 +287,11 @@ def _i_responded(msg: dict, my_id: str) -> bool:
     if not channel_id or not ts:
         return False
 
-    # Fetch canonical message — gives reliable reactions + thread_ts.
-    canon = None
+    # Reuse canonical message if caller provided it; otherwise fetch.
     history_failed = False
-    try:
-        hist = slack_call(
-            "conversations.history",
-            SLACK_USER_TOKEN,
-            channel=channel_id,
-            oldest=ts,
-            latest=ts,
-            inclusive="true",
-            limit=1,
-        )
-        canon = (hist.get("messages") or [{}])[0]
-    except RuntimeError:
-        history_failed = True
+    if canon is None:
+        canon = _fetch_canonical(channel_id, ts)
+        history_failed = canon is None
 
     if canon:
         if check_reactions(canon):
