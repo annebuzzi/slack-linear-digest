@@ -247,8 +247,11 @@ def _looks_like_bot(m: dict) -> bool:
 
 
 def _fetch_canonical(channel_id: str | None, ts: str | None) -> dict | None:
+    """Return the full message object — works for both top-level messages and thread replies."""
     if not channel_id or not ts:
         return None
+    # conversations.history only returns parents, so try it first; fall back to
+    # conversations.replies (which works for any ts and includes thread_ts).
     try:
         hist = slack_call(
             "conversations.history",
@@ -259,10 +262,34 @@ def _fetch_canonical(channel_id: str | None, ts: str | None) -> dict | None:
             inclusive="true",
             limit=1,
         )
+        msgs = hist.get("messages") or []
+        if msgs:
+            return msgs[0]
+    except RuntimeError:
+        pass
+    try:
+        rep = slack_call(
+            "conversations.replies",
+            SLACK_USER_TOKEN,
+            channel=channel_id,
+            ts=ts,
+            limit=1,
+        )
+        msgs = rep.get("messages") or []
+        if msgs:
+            return msgs[0]
     except RuntimeError:
         return None
-    msgs = hist.get("messages") or []
-    return msgs[0] if msgs else None
+    return None
+
+
+def _parent_ts_from_permalink(permalink: str | None) -> str | None:
+    if not permalink or "thread_ts=" not in permalink:
+        return None
+    try:
+        return permalink.split("thread_ts=")[1].split("&")[0]
+    except IndexError:
+        return None
 
 
 def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
@@ -299,7 +326,12 @@ def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
         if canon.get("reply_users") and my_id in canon["reply_users"]:
             return True
 
-    thread_ts = (canon or {}).get("thread_ts") or msg.get("thread_ts") or ts
+    thread_ts = (
+        (canon or {}).get("thread_ts")
+        or msg.get("thread_ts")
+        or _parent_ts_from_permalink(msg.get("permalink"))
+        or ts
+    )
     try:
         thread = slack_call(
             "conversations.replies",
