@@ -255,6 +255,7 @@ def _i_responded(msg: dict, my_id: str) -> bool:
 
     # Fetch canonical message — gives reliable reactions + thread_ts.
     canon = None
+    history_failed = False
     try:
         hist = slack_call(
             "conversations.history",
@@ -267,7 +268,7 @@ def _i_responded(msg: dict, my_id: str) -> bool:
         )
         canon = (hist.get("messages") or [{}])[0]
     except RuntimeError:
-        pass
+        history_failed = True
 
     if canon:
         if check_reactions(canon):
@@ -286,8 +287,10 @@ def _i_responded(msg: dict, my_id: str) -> bool:
         )
     except RuntimeError:
         # Can't verify (likely scope issue on a private channel). Be conservative:
-        # if the canonical message shows the thread has replies, assume I might have
-        # responded and skip flagging to avoid noisy false positives.
+        # assume I responded to avoid false-positive reminders for messages I can't
+        # introspect. Better to miss one than to nag about something already handled.
+        if history_failed:
+            return True
         if canon and canon.get("reply_count", 0) > 0:
             return True
         return False
