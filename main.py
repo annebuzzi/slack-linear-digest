@@ -27,6 +27,9 @@ REACTION_NOT_A_REPLY_USERS = {
     "U09LN7NC479",  # Luiza
     "U014H03PG4C",  # Kylie
 }
+# Senders and channels to always ignore (e.g. the digest bot's own output).
+IGNORED_SENDERS = {"U09FFSDSYQJ"}  # SupportBot
+IGNORED_CHANNEL_NAMES = {"anne"}  # the digest channel itself
 IGNORED_LOOKBACK_HOURS = int(os.environ.get("IGNORED_LOOKBACK_HOURS", "48"))
 
 LINEAR_URL = "https://api.linear.app/graphql"
@@ -212,11 +215,15 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
             continue
         if msg.get("user") == my_id:
             continue
+        if msg.get("user") in IGNORED_SENDERS:
+            continue
         if _looks_like_bot(msg):
             continue
         channel = msg.get("channel", {})
         if channel.get("is_im") or channel.get("is_mpim"):
             continue  # handled by DM pass
+        if channel.get("name") in IGNORED_CHANNEL_NAMES:
+            continue  # the digest's own channel
         # Canonical fetch also lets us re-check bot fields that search.messages omits.
         canon = _fetch_canonical(channel.get("id"), msg.get("ts"))
         if canon and _looks_like_bot(canon):
@@ -341,12 +348,9 @@ def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
             limit=200,
         )
     except RuntimeError:
-        # Can't verify (likely scope issue on a private channel). Be conservative:
-        # assume I responded to avoid false-positive reminders for messages I can't
-        # introspect. Better to miss one than to nag about something already handled.
-        if history_failed:
-            return True
-        if canon and canon.get("reply_count", 0) > 0:
+        # Can't fetch the thread. If the canonical message shows I'm in reply_users,
+        # trust that; otherwise flag — user can dismiss false positives manually.
+        if canon and canon.get("reply_users") and my_id in canon["reply_users"]:
             return True
         return False
 
