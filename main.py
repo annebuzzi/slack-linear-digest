@@ -196,20 +196,26 @@ def _i_responded(msg: dict, my_id: str) -> bool:
             return True
     if msg.get("reply_users") and my_id in msg["reply_users"]:
         return True
-    if msg.get("thread_ts") and msg.get("reply_count", 0) > 0:
-        try:
-            thread = slack_call(
-                "conversations.replies",
-                SLACK_USER_TOKEN,
-                channel=msg["channel"]["id"],
-                ts=msg["thread_ts"],
-                limit=50,
-            )
-            for reply in thread.get("messages", []):
-                if reply.get("user") == my_id:
-                    return True
-        except RuntimeError:
-            pass
+    channel_id = (msg.get("channel") or {}).get("id")
+    if not channel_id:
+        return False
+    # Always check the thread — search.messages doesn't reliably populate reply_users.
+    thread_ts = msg.get("thread_ts") or msg.get("ts")
+    try:
+        thread = slack_call(
+            "conversations.replies",
+            SLACK_USER_TOKEN,
+            channel=channel_id,
+            ts=thread_ts,
+            limit=100,
+        )
+    except RuntimeError:
+        return False
+    for reply in thread.get("messages", []):
+        if reply.get("ts") == msg.get("ts"):
+            continue  # the mention itself
+        if reply.get("user") == my_id:
+            return True
     return False
 
 
