@@ -22,6 +22,11 @@ SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN") or os.environ["SLACK_SUPPORT
 MY_EMAIL = os.environ.get("MY_EMAIL", "anne.buzzi@archive.com")
 MY_SLACK_USER_ID = os.environ.get("MY_SLACK_USER_ID", "U06SZT6KZ7C")
 DIGEST_CHANNEL = os.environ.get("DIGEST_CHANNEL", "anne")
+# For these senders, an emoji reaction from me does NOT count as a response.
+REACTION_NOT_A_REPLY_USERS = {
+    "U09LN7NC479",  # Luiza
+    "U014H03PG4C",  # Kylie
+}
 IGNORED_LOOKBACK_HOURS = int(os.environ.get("IGNORED_LOOKBACK_HOURS", "48"))
 
 LINEAR_URL = "https://api.linear.app/graphql"
@@ -194,9 +199,12 @@ def fetch_ignored_mentions(my_id: str, oldest_ts: float) -> list[dict]:
 
 
 def _i_responded(msg: dict, my_id: str) -> bool:
-    for r in msg.get("reactions", []) or []:
-        if my_id in (r.get("users") or []):
-            return True
+    sender = msg.get("user")
+    reaction_counts = sender not in REACTION_NOT_A_REPLY_USERS
+    if reaction_counts:
+        for r in msg.get("reactions", []) or []:
+            if my_id in (r.get("users") or []):
+                return True
     if msg.get("reply_users") and my_id in msg["reply_users"]:
         return True
     channel_id = (msg.get("channel") or {}).get("id")
