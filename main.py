@@ -121,46 +121,6 @@ def resolve_user_id(email: str) -> str:
     return slack_call("users.lookupByEmail", SLACK_USER_TOKEN, email=email)["user"]["id"]
 
 
-def fetch_ignored_dms(my_id: str, oldest_ts: float) -> list[dict]:
-    """DMs/MPIMs where the most recent message is from someone else (I haven't replied)."""
-    ignored = []
-    cursor = None
-    while True:
-        params = {"types": "im,mpim", "limit": 100, "exclude_archived": True}
-        if cursor:
-            params["cursor"] = cursor
-        data = slack_call("conversations.list", SLACK_USER_TOKEN, **params)
-        for conv in data.get("channels", []):
-            try:
-                hist = slack_call(
-                    "conversations.history",
-                    SLACK_USER_TOKEN,
-                    channel=conv["id"],
-                    limit=5,
-                    oldest=str(oldest_ts),
-                )
-            except RuntimeError:
-                continue
-            msgs = [m for m in hist.get("messages", []) if m.get("type") == "message" and not m.get("subtype")]
-            if not msgs:
-                continue
-            latest = msgs[0]
-            if latest.get("user") == my_id or latest.get("bot_id"):
-                continue
-            sender = latest.get("user", "unknown")
-            ignored.append({
-                "channel_id": conv["id"],
-                "is_mpim": conv.get("is_mpim", False),
-                "user_id": sender,
-                "text": latest.get("text", "")[:200],
-                "ts": latest.get("ts"),
-            })
-        cursor = data.get("response_metadata", {}).get("next_cursor")
-        if not cursor:
-            break
-    return ignored
-
-
 def fetch_my_usergroup_ids(my_id: str) -> list[str]:
     """User group IDs (Sxxxx) that include me. Needs usergroups:read scope."""
     try:
@@ -374,7 +334,7 @@ def _i_responded(msg: dict, my_id: str, canon: dict | None = None) -> bool:
 PRIORITY = {0: "—", 1: "🔴 Urgent", 2: "🟠 High", 3: "🟡 Med", 4: "🟢 Low"}
 
 
-def build_message(issues: list[dict], ignored_dms: list[dict], ignored_mentions: list[dict]) -> str:
+def build_message(issues: list[dict], ignored_mentions: list[dict]) -> str:
     today = datetime.now().strftime("%A, %b %d")
     lines = [f"*Daily digest — {today}*", ""]
 
@@ -386,16 +346,6 @@ def build_message(issues: list[dict], ignored_dms: list[dict], ignored_mentions:
             prio = PRIORITY.get(i.get("priority", 0), "—")
             due = i.get("dueDate") or "—"
             lines.append(f"• <{i['url']}|{i['identifier']}> {i['title']} · {prio} · due {due} · _{i['state']['name']}_")
-    lines.append("")
-
-    lines.append(f"*💬 Slack DMs waiting on you ({len(ignored_dms)})*")
-    if not ignored_dms:
-        lines.append("_Inbox zero on DMs. 🙌_")
-    else:
-        for d in ignored_dms[:15]:
-            who = f"<@{d['user_id']}>"
-            preview = d["text"].replace("\n", " ")
-            lines.append(f"• {who}: {preview}")
     lines.append("")
 
     lines.append(f"*🔔 Mentions you haven't responded to ({len(ignored_mentions)})*")
@@ -422,19 +372,14 @@ def main() -> int:
 
     issues = fetch_due_today()
     try:
-        ignored_dms = fetch_ignored_dms(my_id, oldest_ts)
-    except RuntimeError as e:
-        print(f"[warn] skipping DMs: {e}", file=sys.stderr)
-        ignored_dms = []
-    try:
         ignored_mentions = fetch_ignored_mentions(my_id, oldest_ts)
     except RuntimeError as e:
         print(f"[warn] skipping mentions: {e}", file=sys.stderr)
         ignored_mentions = []
 
-    text = build_message(issues, ignored_dms, ignored_mentions)
+    text = build_message(issues, ignored_mentions)
     slack_post("chat.postMessage", SLACK_BOT_TOKEN, channel=DIGEST_CHANNEL, text=text, unfurl_links=False, unfurl_media=False)
-    print(f"Sent digest: {len(issues)} issues, {len(ignored_dms)} DMs, {len(ignored_mentions)} mentions")
+    print(f"Sent digest: {len(issues)} issues, {len(ignored_mentions)} mentions")
     return 0
 
 

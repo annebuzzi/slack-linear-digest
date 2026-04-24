@@ -1,9 +1,11 @@
 # slack-linear-digest
 
-Daily Slack DM with:
+Daily Slack digest in `#anne` with:
 - Linear issues assigned to you, due today or overdue
-- Slack DMs/MPIMs where the last message isn't from you
-- Channel mentions of you that you haven't reacted to or replied to
+- Channel mentions of you (direct or via user group) that you haven't reacted to or replied to
+
+DMs are intentionally not included — the app is shared with the team and
+`im:*`/`mpim:*` scopes would give the bot read access to every team DM.
 
 ## Setup
 
@@ -15,9 +17,8 @@ cp .env.example .env   # or rely on ~/.env.shared
 
 ### Slack app scopes
 
-Create a Slack app (or reuse one) with:
-- **User token** (`xoxp-…`): `users:read`, `users:read.email`, `im:history`, `im:read`, `mpim:history`, `mpim:read`, `channels:history`, `groups:history`, `search:read`
-- **Bot token** (`xoxb-…`): `chat:write`, `im:write`
+- **User token** (`xoxp-…`): `search:read`, `channels:history`, `groups:history`, `usergroups:read`
+- **Bot token** (`xoxb-…`): `chat:write`
 
 ### Linear
 
