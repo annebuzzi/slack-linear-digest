@@ -17,9 +17,10 @@ load_dotenv(Path.home() / ".env.shared")
 load_dotenv()  # local .env overrides
 
 LINEAR_API_KEY = os.environ["LINEAR_API_KEY"]
-SLACK_USER_TOKEN = os.environ["SLACK_USER_TOKEN"]
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-MY_EMAIL = os.environ["MY_EMAIL"]
+SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN") or os.environ["SLACK_SUPPORTBOT_USER_TOKEN"]
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN") or os.environ["SLACK_SUPPORTBOT_BOT_TOKEN"]
+MY_EMAIL = os.environ.get("MY_EMAIL", "anne.buzzi@archive.com")
+MY_SLACK_USER_ID = os.environ.get("MY_SLACK_USER_ID", "U06SZT6KZ7C")
 IGNORED_LOOKBACK_HOURS = int(os.environ.get("IGNORED_LOOKBACK_HOURS", "48"))
 
 LINEAR_URL = "https://api.linear.app/graphql"
@@ -106,6 +107,8 @@ def slack_post(method: str, token: str, **payload) -> dict:
 
 
 def resolve_user_id(email: str) -> str:
+    if MY_SLACK_USER_ID:
+        return MY_SLACK_USER_ID
     return slack_call("users.lookupByEmail", SLACK_USER_TOKEN, email=email)["user"]["id"]
 
 
@@ -262,8 +265,16 @@ def main() -> int:
     oldest_ts = (datetime.now(timezone.utc) - timedelta(hours=IGNORED_LOOKBACK_HOURS)).timestamp()
 
     issues = fetch_due_today()
-    ignored_dms = fetch_ignored_dms(my_id, oldest_ts)
-    ignored_mentions = fetch_ignored_mentions(my_id, oldest_ts)
+    try:
+        ignored_dms = fetch_ignored_dms(my_id, oldest_ts)
+    except RuntimeError as e:
+        print(f"[warn] skipping DMs: {e}", file=sys.stderr)
+        ignored_dms = []
+    try:
+        ignored_mentions = fetch_ignored_mentions(my_id, oldest_ts)
+    except RuntimeError as e:
+        print(f"[warn] skipping mentions: {e}", file=sys.stderr)
+        ignored_mentions = []
 
     text = build_message(issues, ignored_dms, ignored_mentions)
     slack_post("chat.postMessage", SLACK_BOT_TOKEN, channel=my_id, text=text, unfurl_links=False, unfurl_media=False)
