@@ -335,8 +335,10 @@ PRIORITY = {0: "—", 1: "🔴 Urgent", 2: "🟠 High", 3: "🟡 Med", 4: "🟢 
 
 
 def build_message(issues: list[dict], ignored_mentions: list[dict]) -> str:
-    today = datetime.now().strftime("%A, %b %d")
-    lines = [f"*Daily digest — {today}*", ""]
+    now = datetime.now()
+    today = now.strftime("%A, %b %d")
+    label = "🌅 Morning digest" if now.hour < 12 else "🌇 End-of-day check-in"
+    lines = [f"*{label} — {today}*", ""]
 
     lines.append(f"*📋 Linear — due today or overdue ({len(issues)})*")
     if not issues:
